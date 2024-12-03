@@ -1,91 +1,148 @@
-const io = require('socket.io-client');
 const forge = require('node-forge');
-const socket = io('http://localhost:3000');
-var readlineSync = require('readline-sync');
+const readlineSync = require('readline-sync');
 const RSA = require('../../src/services/rsa');
+const net = require('net');
 
 const { privateKey, publicKey } = forge.pki.rsa.generateKeyPair({ bits: 2048 });
-const clientPublicKeyString = forge.pki.publicKeyToPem(publicKey)
+const clientPublicKeyString = forge.pki.publicKeyToPem(publicKey);
+let serverPublicKeyObj;
+let username;
 
-let serverPublicKey
-socket.on('Welcome', (message) => {
-    console.log('Server:', message);
+const client = net.createConnection({ port: 3000, host: 'localhost' });
+
+client.on('connect', () => {
+  console.log('Welcome to the ATM!');
+  client.write(JSON.stringify({ type: 'clientPublicKey', publicKey: clientPublicKeyString }));
 });
 
-socket.emit('clientPublicKey', { publicKey: clientPublicKeyString });
+client.on('data', (data) => {
+    const listen = false 
+    const message = JSON.parse(data.toString());
+    if(listen){
+     handleCheckBalance(message.data);
+     return
+    }
+  switch (message.type) {
+    case 'serverPublicKey':
+      handleServerPublicKey(message.publicKey);
+      break;
+    case 'authResult':
+      handleAuthResult(message.result);
+      break;
+    case 'currentBalance':
+      handleCheckBalance(message.data);
 
-socket.on('connect', () => {
-    console.log('Connected to server:', socket.id);
+      break;
+    case 'depositResult':
+      handleDepositResult(message.message);
+      break;
+    case 'withdrawResult':
+        handleWithdrawResult(message.message);
+        listen = true
+        break;
+    case 'error':
+      console.error('Server error:', message.message);
+      client.end();
+      break;
+    default:
+        console.error('Unknown message type:', message.type);
+  }
 });
 
-socket.on('serverPublicKey', (data) => {
-    console.log('Received server public key:', data.publicKey);
-
-    const username = readlineSync.question('Enter username: ');
+function handleServerPublicKey(serverPublicKeyPem) {
+    serverPublicKeyObj = RSA.toPublicKey(serverPublicKeyPem);
+    console.log('Server Public Key', serverPublicKeyPem)
+    username = readlineSync.question('Enter username: ');
     const password = readlineSync.question('Enter password: ');
-
-    serverPublicKey = RSA.toPublicKey(data.publicKey);
-    const encryptedMessage = RSA.encrypt("LOGIN " + username + " " + password, serverPublicKey);
-    socket.emit('login', { message: encryptedMessage })
-    socket.on('authResult', (message) => {
-        console.log('Auth:', message === '1' ? 'Authenticated successfully': 'Authenticated Failure')
-        if(message === '0'){
-            process.exit(0);
-        }
-        if(message === '1')  {
-            let listening = false
-            socket.on('currentBalance', (data) => {
-               const decryptedMessage = RSA.decrypt(data, privateKey);
-               const [_, balance] = decryptedMessage.split(' ');
-               console.log(`\n=============================\nBalance: ${balance}\n=============================\n`);
-            })
-            while (true)  {
-                viewMenu();
-                const selected = readlineSync.question("Choose an option (1-4): ");
-    
-                switch (selected) {
-                    case "1":
-                        const amount = readlineSync.question('Enter amount: ');
-                        const encryptDepositRequest = RSA.encrypt("Deposit " + username + " " + amount, serverPublicKey);
-                        socket.emit('deposit', encryptDepositRequest);
-                        break;
-    
-                    case "2":
-                        const withdrawAmount = readlineSync.question('Enter amount: ');
-                        const encryptWithdrawRequest = RSA.encrypt(`Withdraw ${username} ${withdrawAmount}`, serverPublicKey);
-                        socket.emit('withdraw', encryptWithdrawRequest);
-                        break;
-    
-                    case "3":
-                        const encryptCheckBalanceRequest = RSA.encrypt(`Check_Balance ${username}`, serverPublicKey);
-                        socket.emit('checkBalance', encryptCheckBalanceRequest)
-                        listening = true
-                        break;
-    
-                    case "4":
-                        console.log("Exit");
-                        process.exit(0);
-                    default:
-                        console.log("?????????? Invalid Input, try again ??????????");
-                        continue;
-                }
-                if(listening){
-                    return
-                }
-            }
-        }
-    })
-})
-
-function viewMenu() {
-    console.log("Choose from Menu:");
-    console.log("1. Deposit");
-    console.log("2. Withdraw");
-    console.log("3. Check Balance");
-    console.log("4. Exit");
+    const encryptedMessage = RSA.encrypt(`LOGIN ${username} ${password}`, serverPublicKeyObj);
+    client.write(JSON.stringify({ type: 'login', message: encryptedMessage }));
 }
 
-socket.on('disconnect', () => {
-    console.log('Disconnected from server');
+function handleAuthResult(result) {
+  if (result === '1') {
+    console.log('Authenticated successfully');
+    mainMenu();
+  } else {
+    console.log('Authentication failed');
+    client.end();
+  }
+}
+
+function mainMenu() {
+    while (true) {
+        viewMenu();
+        const selected = readlineSync.question("Choose an option (1-4): ");
+
+        switch (selected) {
+            case "1":
+                deposit();
+                break;
+
+            case "2":
+                withdraw();
+                break;
+
+            case "3":
+              checkBalance();
+                break;
+
+            case "4":
+                console.log("Exit");
+                client.end();
+                return;
+            default:
+                console.log("?????????? Invalid Input, try again ??????????");
+        }
+        if(selected === '3'){
+            return
+        }
+    }
+}
+
+function deposit() {
+  const amount = readlineSync.question('Enter amount: ');
+  const encryptedMessage = RSA.encrypt(`Deposit ${username} ${amount}`, serverPublicKeyObj);
+  client.write(JSON.stringify({ type: 'deposit', message: encryptedMessage }));
+}
+
+function withdraw() {
+  const amount = readlineSync.question('Enter amount: ');
+  const encryptedMessage = RSA.encrypt(`Withdraw ${username} ${amount}`, serverPublicKeyObj);
+  client.write(JSON.stringify({ type: 'withdraw', message: encryptedMessage }));
+}
+
+function checkBalance() {
+  const encryptedMessage = RSA.encrypt(`Check_Balance ${username}`, serverPublicKeyObj);
+  client.write(JSON.stringify({ type: 'checkBalance', message: encryptedMessage }));
+}
+
+function handleCheckBalance(encryptedData) {
+  const decryptedMessage = RSA.decrypt(encryptedData, privateKey);
+  const [_, balance] = decryptedMessage.split(' ');
+  console.log(`\n=============================\nBalance: ${balance}\n=============================\n`);
+}
+
+function handleDepositResult(message){
+    console.log(message);
+}
+
+function handleWithdrawResult(message){
+    console.log(message);
+}
+
+
+function viewMenu() {
+  console.log("Choose from Menu:");
+  console.log("1. Deposit");
+  console.log("2. Withdraw");
+  console.log("3. Check Balance");
+  console.log("4. Exit");
+}
+
+client.on('close', () => {
+  console.log('Disconnected from server');
 });
 
+client.on('error', (err) => {
+  console.error('Client error:', err);
+});
